@@ -1,0 +1,123 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner() {
+      return signedIn()
+        && request.auth.uid == 'UYwFompkDKNoZllfZ6ffzS9k1MF3';
+    }
+
+    function hasTeacherProfile() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/teacherProfiles/$(request.auth.uid));
+    }
+
+    function teacherProfile() {
+      return get(/databases/$(database)/documents/teacherProfiles/$(request.auth.uid)).data;
+    }
+
+    function teacherIsActiveForSchool(schoolId) {
+      return hasTeacherProfile()
+        && teacherProfile().active == true
+        && teacherProfile().ownerUid == 'UYwFompkDKNoZllfZ6ffzS9k1MF3'
+        && teacherProfile().schoolId == schoolId;
+    }
+
+    function teacherCanReadSessionSnapshot() {
+      return signedIn()
+        && hasTeacherProfile()
+        && teacherProfile().active == true
+        && teacherProfile().ownerUid == 'UYwFompkDKNoZllfZ6ffzS9k1MF3'
+        && resource.data.ownerUid == 'UYwFompkDKNoZllfZ6ffzS9k1MF3'
+        && teacherProfile().schoolId == resource.data.schoolId
+        && teacherProfile().allowedSessions is list
+        && resource.data.sessionName in teacherProfile().allowedSessions;
+    }
+
+    function teacherCanWriteMark(data) {
+      let p = teacherProfile();
+      let controlPath = /databases/$(database)/documents/schoolSessionControl/$(data.schoolId);
+      return signedIn()
+        && hasTeacherProfile()
+        && p.active == true
+        && p.ownerUid == 'UYwFompkDKNoZllfZ6ffzS9k1MF3'
+        && p.schoolId == data.schoolId
+        && p.classes is list
+        && data.cls in p.classes
+        && p.subjects is list
+        && exists(controlPath)
+        && get(controlPath).data.currentSessionName == data.sessionName
+        && (
+          data.subject in p.subjects
+          || (data.cls <= 8 && data.subject == 'Drawing'
+              && ('Drawing (6-10)' in p.subjects || 'Drawing (6-8)' in p.subjects))
+          || (data.cls >= 9 && data.subject in ['Drawing A', 'Drawing B']
+              && ('Drawing (6-10)' in p.subjects
+                  || 'Drawing A (9-10)' in p.subjects
+                  || 'Drawing B (9-10)' in p.subjects))
+          || (data.cls <= 8 && data.subject == 'Yoga Sanskriti'
+              && 'Yoga Sanskriti (6-8)' in p.subjects)
+        );
+    }
+
+    // Owner's complete school/session store.
+    match /owners/{ownerId} {
+      allow read, write: if isOwner() && ownerId == request.auth.uid;
+    }
+
+    // Owner creates and updates teacher permissions. A teacher can read only their own profile.
+    match /teacherProfiles/{teacherId} {
+      allow read: if isOwner() || (signedIn() && request.auth.uid == teacherId);
+      allow create, update: if isOwner()
+        && request.resource.data.uid == teacherId
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.role == 'teacher';
+      allow delete: if isOwner();
+    }
+
+    // Current session and the list of sessions published by the Owner.
+    match /schoolSessionControl/{schoolId} {
+      allow read: if isOwner() || teacherIsActiveForSchool(schoolId);
+      allow create, update: if isOwner()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.schoolId == schoolId
+        && request.resource.data.currentSessionName is string
+        && request.resource.data.sessionNames is list;
+      allow delete: if isOwner();
+    }
+
+    // Read-only student roster snapshots for sessions specifically allowed by the Owner.
+    match /sessionSnapshots/{snapshotId} {
+      allow read: if isOwner() || teacherCanReadSessionSnapshot();
+      allow create, update: if isOwner()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.schoolId is string
+        && request.resource.data.sessionName is string
+        && request.resource.data.students is list;
+      allow delete: if isOwner();
+    }
+
+    // Teachers may read their own marks; writing is restricted to assigned classes/subjects
+    // and the currently active session. Owner can read and manage all marks.
+    match /teacherMarks/{markId} {
+      allow read: if isOwner()
+        || (signedIn() && resource.data.teacherUid == request.auth.uid);
+      allow create, update: if isOwner() || (
+        signedIn()
+        && request.resource.data.teacherUid == request.auth.uid
+        && request.resource.data.ownerUid == 'UYwFompkDKNoZllfZ6ffzS9k1MF3'
+        && teacherCanWriteMark(request.resource.data)
+      );
+      allow delete: if isOwner() || (
+        signedIn()
+        && resource.data.teacherUid == request.auth.uid
+        && teacherCanWriteMark(resource.data)
+      );
+    }
+  }
+}
